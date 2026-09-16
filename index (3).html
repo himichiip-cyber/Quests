@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Quests</title>
+<meta name="theme-color" content="#D4F26B" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Quests" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<link rel="icon" href="./icon-192.png" />
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@500;600;700;800&display=swap" rel="stylesheet" />
+
+<!-- React (no build step needed) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Firebase (auth + database, so your data syncs across devices) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #FBF1C7; }
+  * { box-sizing: border-box; }
+  button { font-family: inherit; cursor: pointer; }
+  input, textarea { font-family: inherit; }
+  ::placeholder { color: #9B9578; }
+  .display { font-family: 'Fredoka', sans-serif; }
+  body { font-family: 'Nunito', system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // ====================================================================
+  // 1) PASTE YOUR FIREBASE CONFIG HERE.
+  //    Get this from: Firebase console → Project settings → General →
+  //    "Your apps" → the web app (</>) → SDK setup and configuration.
+  // ====================================================================
+  const firebaseConfig = {
+    apiKey: "AIzaSyCZMl67dww3_QS44Oeg65h7AhlvTgMWW8o",
+    authDomain: "quests-6a4b5.firebaseapp.com",
+    projectId: "quests-6a4b5",
+    storageBucket: "quests-6a4b5.firebasestorage.app",
+    messagingSenderId: "22818627498",
+    appId: "1:22818627498:web:57588338e84e77e07c15d3",
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+  const db = firebase.firestore();
+
+  // Note: no service worker here on purpose — it was causing stale-cache
+  // issues, and this app needs internet anyway to sync your data.
+
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback } = React;
+
+// ---------- storage, backed by Firestore instead of the Claude artifact API ----------
+async function storageGet(key) {
+  const user = auth.currentUser;
+  if (!user) return null;
+  const snap = await db.collection('users').doc(user.uid).get();
+  if (!snap.exists) return null;
+  const data = snap.data();
+  return data && data[key] ? { value: data[key] } : null;
+}
+async function storageSet(key, value) {
+  const user = auth.currentUser;
+  if (!user) return null;
+  await db.collection('users').doc(user.uid).set({ [key]: value }, { merge: true });
+  return { key, value };
+}
+
+// ---------- helpers ----------
+const uid = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const todayKey = () => new Date().toISOString().slice(0, 10);
+const weekStartKey = (d = new Date()) => {
+  const date = new Date(d);
+  const day = date.getDay();
+  const diff = (day === 0 ? -6 : 1) - day;
+  date.setDate(date.getDate() + diff);
+  return date.toISOString().slice(0, 10);
+};
+const weekDates = (wk) => {
+  const out = [];
+  const start = new Date(wk);
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    out.push(d.toISOString().slice(0, 10));
+  }
+  return out;
+};
+const weeksBack = (n) => {
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i * 7);
+    out.push(weekStartKey(d));
+  }
+  return out;
+};
+const fmtDate = () => new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+const fmtWeekShort = (wk) => new Date(wk).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const num = (v) => (v !== '' && !isNaN(Number(v)) ? Number(v) : 0);
+
+const EMPTY_APP = {
+  inbox: [],
+  toSchedule: [],
+  today: { professional: [], personal: [] },
+  backlog: { professional: [], personal: [] },
+  lists: [],
+  history: [],
+};
+const EMPTY_HABITS = { habits: [], log: {} };
+
+function Icon({ name, size = 18 }) {
+  const s = { width: size, height: size, viewBox: '0 0 24 24' };
+  const stroke = { fill: 'none', stroke: '#14120A', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' };
+  switch (name) {
+    case 'smiley':
+      return <svg {...s}><circle cx="12" cy="12" r="9" fill="#FFE083" stroke="#14120A" strokeWidth="1.8" /><circle cx="8.7" cy="10.5" r="1.1" fill="#14120A" /><circle cx="15.3" cy="10.5" r="1.1" fill="#14120A" /><path d="M8 14.2c1 1.4 2.5 2 4 2s3-.6 4-2" fill="none" stroke="#14120A" strokeWidth="1.8" strokeLinecap="round" /></svg>;
+    case 'floppy':
+      return <svg {...s}><rect x="4" y="4" width="16" height="16" rx="2" fill="#BFE3F5" stroke="#14120A" strokeWidth="1.8" /><rect x="7" y="4" width="8" height="5" fill="#FFFDF6" stroke="#14120A" strokeWidth="1.6" /><rect x="6.5" y="13" width="11" height="6" fill="#FFFDF6" stroke="#14120A" strokeWidth="1.6" /></svg>;
+    case 'folder':
+      return <svg {...s}><path d="M3.5 7a1.5 1.5 0 0 1 1.5-1.5h4l1.5 2h8A1.5 1.5 0 0 1 20 9v8.5A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5V7Z" fill="#FFD1E8" stroke="#14120A" strokeWidth="1.8" /></svg>;
+    case 'star':
+      return <svg {...s}><path d="M12 3.5l1.8 4.7 5 .6-3.7 3.4 1 5-4.1-2.5-4.1 2.5 1-5-3.7-3.4 5-.6L12 3.5Z" fill="#FFE083" stroke="#14120A" strokeWidth="1.6" strokeLinejoin="round" /></svg>;
+    case 'check':
+      return <svg {...s}><circle cx="12" cy="12" r="9" fill="#C8F2D6" stroke="#14120A" strokeWidth="1.8" /><path d="M8 12.5l2.6 2.6L16.5 9" fill="none" stroke="#14120A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+    case 'clock':
+      return <svg {...s}><circle cx="12" cy="12" r="9" fill="#FFE9A8" stroke="#14120A" strokeWidth="1.8" /><path d="M12 7.5V12l3 2" fill="none" stroke="#14120A" strokeWidth="1.8" strokeLinecap="round" /></svg>;
+    case 'stack':
+      return <svg {...s}><rect x="4.5" y="9.5" width="15" height="4" rx="1" fill="#E3D6FB" stroke="#14120A" strokeWidth="1.6" /><rect x="4.5" y="14.2" width="15" height="4" rx="1" fill="#E3D6FB" stroke="#14120A" strokeWidth="1.6" /><rect x="4.5" y="4.8" width="15" height="3.4" rx="1" fill="#E3D6FB" stroke="#14120A" strokeWidth="1.6" /></svg>;
+    case 'chart':
+      return <svg {...s}><rect x="3.5" y="3.5" width="17" height="17" rx="2" fill="#FFD9B8" stroke="#14120A" strokeWidth="1.8" /><path d="M7 16V11M12 16V7.5M17 16v-5" stroke="#14120A" strokeWidth="1.8" strokeLinecap="round" /></svg>;
+    case 'briefcase':
+      return <svg {...s}><rect x="3.5" y="7.5" width="17" height="11" rx="1.5" fill="#BFE3F5" stroke="#14120A" strokeWidth="1.8" /><path d="M8.5 7.5V6a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v1.5" fill="none" stroke="#14120A" strokeWidth="1.8" /></svg>;
+    case 'person':
+      return <svg {...s}><circle cx="12" cy="12" r="9" fill="#FFD1E8" stroke="#14120A" strokeWidth="1.8" /><circle cx="12" cy="9.7" r="2.6" {...stroke} /><path d="M6.8 17.5c1-2.6 3-3.8 5.2-3.8s4.2 1.2 5.2 3.8" {...stroke} /></svg>;
+    case 'plus':
+      return <svg {...s}><path d="M12 5v14M5 12h14" stroke="#14120A" strokeWidth="2.2" strokeLinecap="round" /></svg>;
+    case 'x':
+      return <svg {...s}><path d="M6 6l12 12M18 6L6 18" stroke="#14120A" strokeWidth="2" strokeLinecap="round" /></svg>;
+    case 'arrowRight':
+      return <svg {...s}><path d="M4 12h14M12 6l6 6-6 6" stroke="#14120A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+    default:
+      return null;
+  }
+}
+
+function IconBadge({ name, bg = '#FFE083', size = 30 }) {
+  return (
+    <div style={{ width: size, height: size, borderRadius: 9, background: bg, border: '2.2px solid #14120A', boxShadow: '2px 2px 0 #14120A', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+      <Icon name={name} size={size * 0.6} />
+    </div>
+  );
+}
+
+function WindowDots() {
+  return (
+    <div style={{ display: 'flex', gap: 5, marginBottom: 8 }}>
+      <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#FF7A7A', border: '1.6px solid #14120A' }} />
+      <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#FFD166', border: '1.6px solid #14120A' }} />
+      <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#8BD3A0', border: '1.6px solid #14120A' }} />
+    </div>
+  );
+}
+
+const TABS = [
+  { id: 'notes', label: 'Notes', icon: 'floppy', bg: '#BFE3F5' },
+  { id: 'today', label: 'Today', icon: 'smiley', bg: '#FFE083' },
+  { id: 'backlog', label: 'Backlog', icon: 'stack', bg: '#E3D6FB' },
+  { id: 'lists', label: 'Lists', icon: 'folder', bg: '#FFD1E8' },
+  { id: 'habits', label: 'Habits', icon: 'star', bg: '#C8F2D6' },
+  { id: 'insights', label: 'Insights', icon: 'chart', bg: '#FFD9B8' },
+];
+
+const CAT_META = {
+  professional: { label: 'Work', icon: 'briefcase', bg: '#BFE3F5' },
+  personal: { label: 'Personal', icon: 'person', bg: '#FFD1E8' },
+};
+
+function SignInScreen() {
+  const signIn = () => {
+    const provider = new firebase.auth.GoogleAuthProvider();
+    auth.signInWithPopup(provider).catch((e) => alert('Sign-in failed: ' + e.message));
+  };
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, background: '#FBF1C7' }}>
+      <IconBadge name="smiley" bg="#FFE083" size={56} />
+      <div className="display" style={{ fontSize: 24, fontWeight: 700 }}>quests</div>
+      <button onClick={signIn} className="display" style={{ background: '#D4F26B', border: '2.5px solid #14120A', borderRadius: 10, boxShadow: '3px 3px 0 #14120A', padding: '10px 20px', fontWeight: 600, fontSize: 14 }}>
+        Sign in with Google
+      </button>
+      <div style={{ fontSize: 12.5, fontWeight: 600, opacity: 0.6, maxWidth: 260, textAlign: 'center' }}>Sign in with the same account on every device to keep everything in sync.</div>
+    </div>
+  );
+}
+
+function QuestLog() {
+  const [loaded, setLoaded] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [tab, setTab] = useState('today');
+  const [app, setApp] = useState(EMPTY_APP);
+  const [commitments, setCommitments] = useState({});
+  const [habitsData, setHabitsData] = useState(EMPTY_HABITS);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [a, c, h] = await Promise.allSettled([
+          storageGet('app-data'),
+          storageGet('commitments-data'),
+          storageGet('habits-data'),
+        ]);
+        if (a.status === 'fulfilled' && a.value) setApp({ ...EMPTY_APP, ...JSON.parse(a.value.value) });
+        if (c.status === 'fulfilled' && c.value) setCommitments(JSON.parse(c.value.value));
+        if (h.status === 'fulfilled' && h.value) setHabitsData({ ...EMPTY_HABITS, ...JSON.parse(h.value.value) });
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoaded(true);
+      }
+    })();
+  }, []);
+
+  const persist = useCallback(async (key, value) => {
+    try {
+      const res = await storageSet(key, JSON.stringify(value));
+      setSaveError(res ? '' : "Couldn't save just now — try again in a moment.");
+    } catch (e) {
+      console.error(e);
+      setSaveError("Couldn't save just now — try again in a moment.");
+    }
+  }, []);
+
+  const updateApp = useCallback((updater) => {
+    setApp((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      persist('app-data', next);
+      return next;
+    });
+  }, [persist]);
+
+  const updateCommitments = useCallback((updater) => {
+    setCommitments((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      persist('commitments-data', next);
+      return next;
+    });
+  }, [persist]);
+
+  const updateHabits = useCallback((updater) => {
+    setHabitsData((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      persist('habits-data', next);
+      return next;
+    });
+  }, [persist]);
+
+  if (!loaded) {
+    return <Shell><div style={{ textAlign: 'center', padding: '70px 20px', fontWeight: 700 }}>loading…</div></Shell>;
+  }
+
+  return (
+    <Shell>
+      <Header saveError={saveError} />
+      <div style={{ padding: '14px 14px 104px' }}>
+        {tab === 'notes' && <NotesTab app={app} updateApp={updateApp} />}
+        {tab === 'today' && (
+          <TodayTab
+            app={app}
+            updateApp={updateApp}
+            commitments={commitments[todayKey()] || []}
+            setCommitments={(list) => updateCommitments((prev) => ({ ...prev, [todayKey()]: list }))}
+          />
+        )}
+        {tab === 'backlog' && <BacklogTab app={app} updateApp={updateApp} />}
+        {tab === 'lists' && <ListsTab app={app} updateApp={updateApp} />}
+        {tab === 'habits' && <HabitsTab habitsData={habitsData} updateHabits={updateHabits} />}
+        {tab === 'insights' && <InsightsTab app={app} habitsData={habitsData} commitments={commitments} />}
+      </div>
+      <BottomNav tab={tab} setTab={setTab} />
+    </Shell>
+  );
+}
+
+function Shell({ children }) {
+  return (
+    <div style={{ '--ink': '#14120A', '--bg': '#FBF1C7', minHeight: '100vh', background: 'var(--bg)', color: 'var(--ink)', maxWidth: 480, margin: '0 auto', position: 'relative' }}>
+      {children}
+    </div>
+  );
+}
+
+function Header({ saveError }) {
+  const signOut = () => auth.signOut();
+  return (
+    <div style={{ padding: '16px 14px', background: '#D4F26B', borderBottom: '3px solid var(--ink)', position: 'sticky', top: 0, zIndex: 5, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <IconBadge name="smiley" bg="#FFE083" size={38} />
+      <div>
+        <div className="display" style={{ fontSize: 19, fontWeight: 700 }}>quests</div>
+        <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.7 }}>{fmtDate()}</div>
+      </div>
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        {saveError && <div style={{ fontSize: 11, background: '#FFD1E8', border: '2px solid var(--ink)', borderRadius: 8, padding: '4px 8px', fontWeight: 700 }}>{saveError}</div>}
+        <button onClick={signOut} style={{ border: 'none', background: 'none', fontSize: 11, fontWeight: 700, opacity: 0.5, textDecoration: 'underline' }}>sign out</button>
+      </div>
+    </div>
+  );
+}
+
+function BottomNav({ tab, setTab }) {
+  return (
+    <div style={{ position: 'fixed', bottom: 0, left: '50%', transform: 'translateX(-50%)', width: '100%', maxWidth: 480, display: 'flex', gap: 6, padding: '8px 8px', borderTop: '3px solid var(--ink)', background: '#FFFDF6' }}>
+      {TABS.map((t) => {
+        const active = tab === t.id;
+        return (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{ flex: 1, border: active ? '2.2px solid var(--ink)' : '2.2px solid transparent', borderRadius: 10, background: active ? t.bg : 'transparent', boxShadow: active ? '2px 2px 0 var(--ink)' : 'none', padding: '6px 2px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+            <Icon name={t.icon} size={16} />
+            <span style={{ fontSize: 9.5, fontWeight: 800 }}>{t.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function Card({ children, style, bg = '#FFFDF6', dots = true }) {
+  return (
+    <div style={{ background: bg, border: '3px solid var(--ink)', borderRadius: 16, boxShadow: '5px 5px 0 var(--ink)', padding: '12px 14px 14px', marginBottom: 16, ...style }}>
+      {dots && <WindowDots />}
+      {children}
+    </div>
+  );
+}
+
+function SectionTitle({ children, icon, iconBg, sub }) {
+  return (
+    <div style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
+      {icon && <IconBadge name={icon} bg={iconBg} size={26} />}
+      <div>
+        <div className="display" style={{ fontWeight: 600, fontSize: 15 }}>{children}</div>
+        {sub && <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.6 }}>{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+function Btn({ children, onClick, bg = '#BFE3F5', ghost, small, disabled, title }) {
+  return (
+    <button onClick={onClick} disabled={disabled} title={title} className="display" style={{
+      background: ghost ? 'transparent' : disabled ? '#EAE6D2' : bg,
+      color: 'var(--ink)',
+      border: `2.2px solid ${disabled ? '#C9C4AA' : 'var(--ink)'}`,
+      borderRadius: 9,
+      boxShadow: disabled || ghost ? 'none' : '2.5px 2.5px 0 var(--ink)',
+      padding: small ? '5px 10px' : '9px 15px',
+      fontWeight: 600, fontSize: small ? 12 : 13.5, opacity: disabled ? 0.6 : 1,
+      display: 'inline-flex', alignItems: 'center', gap: 5,
+    }}>{children}</button>
+  );
+}
+
+function IconBtn({ onClick, title }) {
+  return <button onClick={onClick} title={title} style={{ border: 'none', background: 'none', padding: 2, display: 'flex', opacity: 0.55 }}><Icon name="x" size={15} /></button>;
+}
+
+function Hint({ children }) {
+  return <div style={{ fontSize: 13, fontWeight: 600, opacity: 0.55, padding: '4px 0' }}>{children}</div>;
+}
+
+function Field(props) {
+  return <input {...props} style={{ border: '2.2px solid var(--ink)', borderRadius: 9, padding: '7px 10px', fontSize: 13.5, background: '#FFFDF6', fontWeight: 600, ...(props.style || {}) }} />;
+}
+
+function NotesTab({ app, updateApp }) {
+  const [draft, setDraft] = useState('');
+  const [openSorter, setOpenSorter] = useState(null);
+  const [newListName, setNewListName] = useState('');
+
+  const addNote = () => {
+    if (!draft.trim()) return;
+    updateApp((prev) => ({ ...prev, inbox: [...prev.inbox, { id: uid(), text: draft.trim() }] }));
+    setDraft('');
+  };
+  const removeInbox = (id) => updateApp((prev) => ({ ...prev, inbox: prev.inbox.filter((n) => n.id !== id) }));
+
+  const route = (note, dest, listId) => {
+    updateApp((prev) => {
+      const without = prev.inbox.filter((n) => n.id !== note.id);
+      if (dest === 'done') return { ...prev, inbox: without };
+      if (dest === 'schedule') return { ...prev, inbox: without, toSchedule: [...prev.toSchedule, { id: uid(), text: note.text }] };
+      if (dest === 'professional' || dest === 'personal')
+        return { ...prev, inbox: without, backlog: { ...prev.backlog, [dest]: [...prev.backlog[dest], { id: uid(), text: note.text }] } };
+      if (dest === 'list')
+        return { ...prev, inbox: without, lists: prev.lists.map((l) => (l.id === listId ? { ...l, items: [...l.items, { id: uid(), text: note.text, done: false }] } : l)) };
+      return prev;
+    });
+    setOpenSorter(null);
+  };
+
+  const routeToNewList = (note) => {
+    if (!newListName.trim()) return;
+    const listId = uid();
+    updateApp((prev) => ({
+      ...prev,
+      inbox: prev.inbox.filter((n) => n.id !== note.id),
+      lists: [...prev.lists, { id: listId, name: newListName.trim(), items: [{ id: uid(), text: note.text, done: false }] }],
+    }));
+    setNewListName('');
+    setOpenSorter(null);
+  };
+
+  const clearScheduled = (id) => updateApp((prev) => ({ ...prev, toSchedule: prev.toSchedule.filter((n) => n.id !== id) }));
+
+  return (
+    <div>
+      <Card bg="#BFE3F5">
+        <SectionTitle icon="floppy" iconBg="#FFFDF6">Rough notes</SectionTitle>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <Field value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addNote()} placeholder="what's on your mind" style={{ flex: 1 }} />
+          <Btn onClick={addNote} bg="#FFFDF6"><Icon name="plus" size={13} /></Btn>
+        </div>
+      </Card>
+
+      <Card>
+        {app.inbox.length === 0 && <Hint>Inbox is empty.</Hint>}
+        {app.inbox.map((note) => (
+          <div key={note.id} style={{ marginBottom: 10, borderBottom: '2px dashed #E4DCC0', paddingBottom: 10 }}>
+            <div onClick={() => setOpenSorter(openSorter === note.id ? null : note.id)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: 14, fontWeight: 600 }}>{note.text}</span>
+              <IconBtn onClick={(e) => { e.stopPropagation(); removeInbox(note.id); }} />
+            </div>
+            {openSorter === note.id && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  <Btn small bg="#C8F2D6" onClick={() => route(note, 'done')}>Done</Btn>
+                  <Btn small bg={CAT_META.professional.bg} onClick={() => route(note, 'professional')}>Work</Btn>
+                  <Btn small bg={CAT_META.personal.bg} onClick={() => route(note, 'personal')}>Personal</Btn>
+                  <Btn small bg="#FFE9A8" onClick={() => route(note, 'schedule')}>Schedule</Btn>
+                </div>
+                {app.lists.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                    {app.lists.map((l) => <Btn key={l.id} small bg="#E3D6FB" onClick={() => route(note, 'list', l.id)}>{l.name}</Btn>)}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <Field value={newListName} onChange={(e) => setNewListName(e.target.value)} placeholder="new list name" style={{ flex: 1, fontSize: 12.5 }} />
+                  <Btn small bg="#E3D6FB" onClick={() => routeToNewList(note)}>Make list</Btn>
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </Card>
+
+      {app.toSchedule.length > 0 && (
+        <Card bg="#FFE9A8">
+          <SectionTitle icon="clock" iconBg="#FFFDF6">Needs a calendar slot</SectionTitle>
+          {app.toSchedule.map((n) => (
+            <div key={n.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, fontSize: 14, fontWeight: 600 }}>
+              <span>{n.text}</span>
+              <Btn small bg="#FFFDF6" onClick={() => clearScheduled(n.id)}>Scheduled</Btn>
+            </div>
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function TodayTab({ app, updateApp, commitments, setCommitments }) {
+  return (
+    <div>
+      <CommitmentsStrip commitments={commitments} setCommitments={setCommitments} />
+      {['professional', 'personal'].map((cat) => <TodayColumn key={cat} cat={cat} app={app} updateApp={updateApp} />)}
+    </div>
+  );
+}
+
+function CommitmentsStrip({ commitments, setCommitments }) {
+  const [time, setTime] = useState('');
+  const [title, setTitle] = useState('');
+  const [hrs, setHrs] = useState('');
+  const add = () => {
+    if (!title.trim()) return;
+    setCommitments([...commitments, { id: uid(), time: time.trim(), title: title.trim(), hours: hrs.trim() }].sort((a, b) => a.time.localeCompare(b.time)));
+    setTime(''); setTitle(''); setHrs('');
+  };
+  const remove = (id) => setCommitments(commitments.filter((c) => c.id !== id));
+  return (
+    <Card bg="#FFE9A8">
+      <SectionTitle icon="clock" iconBg="#FFFDF6">Fixed today</SectionTitle>
+      {commitments.length === 0 && <Hint>No set-in-stone times today.</Hint>}
+      {commitments.map((c) => (
+        <div key={c.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+          <span>{c.time || '—'} · {c.title}{c.hours ? ` · ${c.hours}h` : ''}</span>
+          <IconBtn onClick={() => remove(c.id)} />
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <Field value={time} onChange={(e) => setTime(e.target.value)} placeholder="2pm" style={{ width: 55 }} />
+        <Field value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="supervisor meeting" style={{ flex: 1 }} />
+        <Field value={hrs} onChange={(e) => setHrs(e.target.value)} placeholder="hrs" style={{ width: 44 }} />
+        <Btn small bg="#FFFDF6" onClick={add}><Icon name="plus" size={12} /></Btn>
+      </div>
+    </Card>
+  );
+}
+
+function TodayColumn({ cat, app, updateApp }) {
+  const meta = CAT_META[cat];
+  const items = app.today[cat];
+  const backlogItems = app.backlog[cat];
+  const [draft, setDraft] = useState('');
+  const [est, setEst] = useState('');
+  const [showPicker, setShowPicker] = useState(false);
+  const openSlots = 3 - items.length;
+
+  const logHistory = (t) => updateApp((prev) => ({ ...prev, history: [...prev.history, { id: uid(), cat, text: t.text, est: t.est, actual: t.actual, weekStart: weekStartKey(), completedAt: new Date().toISOString() }] }));
+
+  const addDirect = () => {
+    if (!draft.trim() || openSlots <= 0) return;
+    updateApp((prev) => ({ ...prev, today: { ...prev.today, [cat]: [...prev.today[cat], { id: uid(), text: draft.trim(), est: est.trim(), actual: '', done: false }] } }));
+    setDraft(''); setEst('');
+  };
+  const toggleDone = (id) => {
+    const t = items.find((x) => x.id === id);
+    if (t && !t.done) logHistory(t);
+    updateApp((prev) => ({ ...prev, today: { ...prev.today, [cat]: prev.today[cat].map((x) => (x.id === id ? { ...x, done: !x.done } : x)) } }));
+  };
+  const setActual = (id, val) => updateApp((prev) => ({ ...prev, today: { ...prev.today, [cat]: prev.today[cat].map((x) => (x.id === id ? { ...x, actual: val } : x)) } }));
+  const removeToday = (id) => updateApp((prev) => ({ ...prev, today: { ...prev.today, [cat]: prev.today[cat].filter((x) => x.id !== id) } }));
+  const pullFromBacklog = (item) => updateApp((prev) => ({
+    ...prev,
+    backlog: { ...prev.backlog, [cat]: prev.backlog[cat].filter((b) => b.id !== item.id) },
+    today: { ...prev.today, [cat]: [...prev.today[cat], { id: uid(), text: item.text, est: '', actual: '', done: false }] },
+  }));
+
+  return (
+    <Card bg={meta.bg}>
+      <SectionTitle icon={meta.icon} iconBg="#FFFDF6" sub={`${items.length} of 3 filled`}>{meta.label}</SectionTitle>
+      {items.length === 0 && <Hint>Nothing picked — pull from backlog below.</Hint>}
+      {items.map((t) => (
+        <div key={t.id} style={{ background: '#FFFDF6', border: '2.2px solid var(--ink)', borderRadius: 10, padding: '8px 10px', marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input type="checkbox" checked={t.done} onChange={() => toggleDone(t.id)} style={{ width: 16, height: 16 }} />
+            <span style={{ flex: 1, fontSize: 14, fontWeight: 600, textDecoration: t.done ? 'line-through' : 'none', opacity: t.done ? 0.5 : 1 }}>{t.text}</span>
+            <IconBtn onClick={() => removeToday(t.id)} />
+          </div>
+          {(t.est || t.done) && (
+            <div style={{ display: 'flex', gap: 10, marginTop: 6, marginLeft: 24, fontSize: 11.5, fontWeight: 700, opacity: 0.65 }}>
+              {t.est && <span>goal {t.est}h</span>}
+              {t.done && <span>actual <input value={t.actual} onChange={(e) => setActual(t.id, e.target.value)} placeholder="?" style={{ width: 28, border: '1.6px solid var(--ink)', borderRadius: 5, padding: '1px 3px', fontFamily: 'inherit', fontWeight: 700 }} />h</span>}
+            </div>
+          )}
+        </div>
+      ))}
+      {openSlots > 0 && (
+        <React.Fragment>
+          <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+            <Field value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addDirect()} placeholder="add directly" style={{ flex: 1 }} />
+            <Field value={est} onChange={(e) => setEst(e.target.value)} placeholder="hrs" style={{ width: 46 }} />
+            <Btn small bg="#FFFDF6" onClick={addDirect}><Icon name="plus" size={12} /></Btn>
+          </div>
+          {backlogItems.length > 0 && (
+            <div style={{ marginTop: 8 }}>
+              <button onClick={() => setShowPicker(!showPicker)} className="display" style={{ border: 'none', background: 'none', fontSize: 12, fontWeight: 700, padding: 0, textDecoration: 'underline' }}>
+                {showPicker ? 'hide backlog' : `pull from backlog (${backlogItems.length})`}
+              </button>
+              {showPicker && (
+                <div style={{ marginTop: 6 }}>
+                  {backlogItems.map((b) => (
+                    <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+                      <span>{b.text}</span>
+                      <Btn small ghost onClick={() => pullFromBacklog(b)}>add<Icon name="arrowRight" size={12} /></Btn>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </React.Fragment>
+      )}
+    </Card>
+  );
+}
+
+function BacklogTab({ app, updateApp }) {
+  return <div>{['professional', 'personal'].map((cat) => <BacklogColumn key={cat} cat={cat} app={app} updateApp={updateApp} />)}</div>;
+}
+
+function BacklogColumn({ cat, app, updateApp }) {
+  const meta = CAT_META[cat];
+  const items = app.backlog[cat];
+  const [draft, setDraft] = useState('');
+  const openSlots = 3 - app.today[cat].length;
+
+  const add = () => {
+    if (!draft.trim()) return;
+    updateApp((prev) => ({ ...prev, backlog: { ...prev.backlog, [cat]: [...prev.backlog[cat], { id: uid(), text: draft.trim() }] } }));
+    setDraft('');
+  };
+  const remove = (id) => updateApp((prev) => ({ ...prev, backlog: { ...prev.backlog, [cat]: prev.backlog[cat].filter((b) => b.id !== id) } }));
+  const promote = (item) => updateApp((prev) => ({
+    ...prev,
+    backlog: { ...prev.backlog, [cat]: prev.backlog[cat].filter((b) => b.id !== item.id) },
+    today: { ...prev.today, [cat]: [...prev.today[cat], { id: uid(), text: item.text, est: '', actual: '', done: false }] },
+  }));
+
+  return (
+    <Card bg={meta.bg}>
+      <SectionTitle icon={meta.icon} iconBg="#FFFDF6">{meta.label} backlog</SectionTitle>
+      {items.length === 0 && <Hint>Nothing waiting.</Hint>}
+      {items.map((b) => (
+        <div key={b.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#FFFDF6', border: '2.2px solid var(--ink)', borderRadius: 10, padding: '7px 10px', marginBottom: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 600 }}>{b.text}</span>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Btn small bg="#FFFDF6" disabled={openSlots <= 0} onClick={() => promote(b)} title={openSlots <= 0 ? "Today is full" : ''}>today</Btn>
+            <IconBtn onClick={() => remove(b.id)} />
+          </div>
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+        <Field value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} placeholder="add to backlog" style={{ flex: 1 }} />
+        <Btn small bg="#FFFDF6" onClick={add}><Icon name="plus" size={12} /></Btn>
+      </div>
+    </Card>
+  );
+}
+
+function ListsTab({ app, updateApp }) {
+  const [newName, setNewName] = useState('');
+  const addList = () => {
+    if (!newName.trim()) return;
+    updateApp((prev) => ({ ...prev, lists: [...prev.lists, { id: uid(), name: newName.trim(), items: [] }] }));
+    setNewName('');
+  };
+  const removeList = (id) => updateApp((prev) => ({ ...prev, lists: prev.lists.filter((l) => l.id !== id) }));
+  const addItem = (listId, text) => {
+    if (!text.trim()) return;
+    updateApp((prev) => ({ ...prev, lists: prev.lists.map((l) => (l.id === listId ? { ...l, items: [...l.items, { id: uid(), text: text.trim(), done: false }] } : l)) }));
+  };
+  const toggleItem = (listId, itemId) => updateApp((prev) => ({ ...prev, lists: prev.lists.map((l) => (l.id === listId ? { ...l, items: l.items.map((i) => (i.id === itemId ? { ...i, done: !i.done } : i)) } : l)) }));
+  const removeItem = (listId, itemId) => updateApp((prev) => ({ ...prev, lists: prev.lists.map((l) => (l.id === listId ? { ...l, items: l.items.filter((i) => i.id !== itemId) } : l)) }));
+
+  return (
+    <div>
+      <Card bg="#FFD1E8">
+        <SectionTitle icon="folder" iconBg="#FFFDF6">New list</SectionTitle>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <Field value={newName} onChange={(e) => setNewName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addList()} placeholder="name it" style={{ flex: 1 }} />
+          <Btn small bg="#FFFDF6" onClick={addList}><Icon name="plus" size={12} /></Btn>
+        </div>
+      </Card>
+      {app.lists.length === 0 && <Hint>No lists yet.</Hint>}
+      {app.lists.map((l) => <ListCard key={l.id} list={l} onAdd={(t) => addItem(l.id, t)} onToggle={(i) => toggleItem(l.id, i)} onRemoveItem={(i) => removeItem(l.id, i)} onRemoveList={() => removeList(l.id)} />)}
+    </div>
+  );
+}
+
+function ListCard({ list, onAdd, onToggle, onRemoveItem, onRemoveList }) {
+  const [draft, setDraft] = useState('');
+  const submit = () => { onAdd(draft); setDraft(''); };
+  return (
+    <Card>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span className="display" style={{ fontWeight: 600, fontSize: 14.5 }}>{list.name}</span>
+        <IconBtn onClick={onRemoveList} title="Delete this list" />
+      </div>
+      {list.items.length === 0 && <Hint>Empty.</Hint>}
+      {list.items.map((i) => (
+        <div key={i.id} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+          <input type="checkbox" checked={i.done} onChange={() => onToggle(i.id)} />
+          <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, textDecoration: i.done ? 'line-through' : 'none', opacity: i.done ? 0.5 : 1 }}>{i.text}</span>
+          <IconBtn onClick={() => onRemoveItem(i.id)} />
+        </div>
+      ))}
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <Field value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} placeholder="add an item" style={{ flex: 1 }} />
+        <Btn small bg="#FFFDF6" onClick={submit}><Icon name="plus" size={12} /></Btn>
+      </div>
+    </Card>
+  );
+}
+
+function HabitsTab({ habitsData, updateHabits }) {
+  const [name, setName] = useState('');
+  const [goal, setGoal] = useState(3);
+  const wk = weekStartKey();
+  const weekLog = habitsData.log[wk] || {};
+  const history8 = weeksBack(8);
+
+  const addHabit = () => {
+    if (!name.trim()) return;
+    updateHabits((prev) => ({ ...prev, habits: [...prev.habits, { id: uid(), name: name.trim(), goal: Number(goal) || 1 }] }));
+    setName(''); setGoal(3);
+  };
+  const removeHabit = (id) => updateHabits((prev) => ({ ...prev, habits: prev.habits.filter((h) => h.id !== id) }));
+  const bump = (id, delta) => updateHabits((prev) => {
+    const current = (prev.log[wk] && prev.log[wk][id]) || 0;
+    const next = Math.max(0, current + delta);
+    return { ...prev, log: { ...prev.log, [wk]: { ...(prev.log[wk] || {}), [id]: next } } };
+  });
+
+  return (
+    <div>
+      {habitsData.habits.length === 0 && <Card bg="#C8F2D6"><Hint>Add a habit below and tap "log it" whenever it happens.</Hint></Card>}
+      {habitsData.habits.map((h) => {
+        const count = weekLog[h.id] || 0;
+        const hit = count >= h.goal;
+        return (
+          <Card key={h.id} bg={hit ? '#C8F2D6' : '#FFFDF6'}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="display" style={{ fontWeight: 600, fontSize: 15 }}>{h.name}</span>
+              <IconBtn onClick={() => removeHabit(h.id)} />
+            </div>
+            <div style={{ fontSize: 12, fontWeight: 700, opacity: 0.6, marginTop: 2 }}>{count} / {h.goal} this week</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+              <Btn small bg="#8BD3A0" onClick={() => bump(h.id, 1)}><Icon name="plus" size={11} />log it</Btn>
+              <Btn small ghost onClick={() => bump(h.id, -1)}>undo</Btn>
+            </div>
+            <div style={{ display: 'flex', gap: 3, marginTop: 12, alignItems: 'flex-end', height: 30 }}>
+              {history8.map((wkKey) => {
+                const c = (habitsData.log[wkKey] && habitsData.log[wkKey][h.id]) || 0;
+                const ratio = Math.min(1, c / h.goal);
+                const met = c >= h.goal && h.goal > 0;
+                return (
+                  <div key={wkKey} title={`${fmtWeekShort(wkKey)}: ${c}/${h.goal}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', height: '100%' }}>
+                    <div style={{ height: `${Math.max(ratio, c > 0 ? 0.12 : 0.04) * 100}%`, background: met ? '#5FAE7A' : c > 0 ? '#D8D2B4' : '#EFEBD8', border: '1.4px solid var(--ink)', borderRadius: 2 }} />
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 9.5, fontWeight: 700, opacity: 0.45, marginTop: 4 }}>last 8 weeks</div>
+          </Card>
+        );
+      })}
+      <Card bg="#C8F2D6">
+        <SectionTitle icon="star" iconBg="#FFFDF6">New habit</SectionTitle>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <Field value={name} onChange={(e) => setName(e.target.value)} placeholder="name it" style={{ flex: 1 }} />
+          <Field type="number" min={1} value={goal} onChange={(e) => setGoal(e.target.value)} style={{ width: 54 }} />
+          <Btn small bg="#FFFDF6" onClick={addHabit}><Icon name="plus" size={12} /></Btn>
+        </div>
+        <div style={{ fontSize: 10.5, fontWeight: 700, opacity: 0.5, marginTop: 4 }}>number = times per week</div>
+      </Card>
+    </div>
+  );
+}
+
+function InsightsTab({ app, habitsData, commitments }) {
+  const wk = weekStartKey();
+  const lastWk = weeksBack(2)[0];
+  const thisWeekHist = app.history.filter((h) => h.weekStart === wk);
+  const lastWeekHist = app.history.filter((h) => h.weekStart === lastWk);
+
+  const countBy = (list, cat) => list.filter((h) => h.cat === cat).length;
+  const workDone = countBy(thisWeekHist, 'professional');
+  const personalDone = countBy(thisWeekHist, 'personal');
+  const workDoneLast = countBy(lastWeekHist, 'professional');
+  const personalDoneLast = countBy(lastWeekHist, 'personal');
+
+  const thisWeekDates = weekDates(wk);
+  const commitmentHours = thisWeekDates.reduce((sum, d) => sum + (commitments[d] || []).reduce((s, c) => s + num(c.hours), 0), 0);
+  const workTaskHours = thisWeekHist.filter((h) => h.cat === 'professional').reduce((s, h) => s + num(h.actual), 0);
+  const totalWorkHours = commitmentHours + workTaskHours;
+
+  const withBoth = thisWeekHist.filter((h) => h.cat === 'professional' && h.est !== '' && h.actual !== '' && !isNaN(Number(h.est)) && !isNaN(Number(h.actual)));
+  const totalEst = withBoth.reduce((s, h) => s + Number(h.est), 0);
+  const totalActual = withBoth.reduce((s, h) => s + Number(h.actual), 0);
+  const ratio = totalEst > 0 ? totalActual / totalEst : null;
+  let reflection = 'Log a goal and an actual on a few work tasks to see how your planning tracks.';
+  if (ratio !== null) {
+    if (ratio > 1.15) reflection = `Work tasks are running about ${Math.round((ratio - 1) * 100)}% over your estimates this week.`;
+    else if (ratio < 0.85) reflection = `You're finishing work tasks about ${Math.round((1 - ratio) * 100)}% faster than planned this week.`;
+    else reflection = 'Your work estimates are landing close to reality this week.';
+  }
+
+  const habitRows = habitsData.habits.map((h) => ({ name: h.name, count: (habitsData.log[wk] && habitsData.log[wk][h.id]) || 0, goal: h.goal }));
+  const onTrack = habitRows.filter((h) => h.count >= h.goal).length;
+
+  return (
+    <div>
+      <Card bg="#FFD9B8">
+        <SectionTitle icon="clock" iconBg="#FFFDF6" sub={`week of ${fmtWeekShort(wk)}`}>Real work hours</SectionTitle>
+        <div className="display" style={{ fontSize: 30, fontWeight: 600 }}>{totalWorkHours}h</div>
+        <div style={{ fontSize: 12.5, fontWeight: 700, opacity: 0.65, marginTop: 2 }}>{commitmentHours}h scheduled (classes/meetings) + {workTaskHours}h logged on work tasks</div>
+      </Card>
+
+      <Card bg="#BFE3F5">
+        <SectionTitle icon="check" iconBg="#FFFDF6" sub={`work ${workDoneLast ? `vs ${workDoneLast} last wk` : ''}`}>Completed this week</SectionTitle>
+        <div style={{ display: 'flex', gap: 20 }}>
+          <div><div className="display" style={{ fontSize: 22, fontWeight: 600 }}>{workDone}</div><div style={{ fontSize: 12, fontWeight: 700, opacity: 0.6 }}>work</div></div>
+          <div><div className="display" style={{ fontSize: 22, fontWeight: 600 }}>{personalDone}</div><div style={{ fontSize: 12, fontWeight: 700, opacity: 0.6 }}>personal {personalDoneLast ? `(${personalDoneLast} last wk)` : ''}</div></div>
+        </div>
+      </Card>
+
+      <Card bg="#FFFDF6">
+        <SectionTitle icon="chart" iconBg="#FFD9B8">Planning accuracy</SectionTitle>
+        <div style={{ fontSize: 13.5, fontWeight: 600 }}>{reflection}</div>
+      </Card>
+
+      <Card bg="#C8F2D6">
+        <SectionTitle icon="star" iconBg="#FFFDF6" sub={habitsData.habits.length ? `${onTrack} of ${habitsData.habits.length} on track` : undefined}>Habits this week</SectionTitle>
+        {habitRows.length === 0 && <Hint>No habits set up yet.</Hint>}
+        {habitRows.map((h) => (
+          <div key={h.name} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, fontWeight: 600, marginBottom: 4 }}>
+            <span>{h.name}</span>
+            <span>{h.count}/{h.goal}</span>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+function AppRoot() {
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  useEffect(() => auth.onAuthStateChanged(setUser), []);
+  if (user === undefined) return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>loading…</div>;
+  if (user === null) return <SignInScreen />;
+  return <QuestLog />;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<AppRoot />);
+</script>
+</body>
+</html>
